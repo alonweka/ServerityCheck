@@ -615,6 +615,8 @@ def run_actual_mode(
                 entry.update(log_entry)
             else:
                 log_data.append(log_entry)
+            # Mark ticket as checked
+            add_label_to_ticket(jira, ticket["key"], "AI-Priority-Check")
             processed += 1
             print("-" * 100)
             continue
@@ -627,8 +629,9 @@ def run_actual_mode(
         comment = build_comment(analysis)
         add_comment_to_ticket(jira, ticket["key"], comment)
 
-        # Add label
+        # Mark ticket as checked + propose change
         add_label_to_ticket(jira, ticket["key"], "AI-Priority-Check")
+        add_label_to_ticket(jira, ticket["key"], "AI-Priority-Propose")
 
         commented += 1
         processed += 1
