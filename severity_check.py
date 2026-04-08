@@ -165,60 +165,96 @@ FIELDS_TO_FETCH = [
 ]
 
 
+def _parse_issue(issue) -> dict:
+    """Extract relevant fields from a Jira issue object."""
+    f = issue.fields
+    comments_text = ""
+    if f.comment and f.comment.comments:
+        recent_comments = f.comment.comments[-10:]
+        comments_text = "\n---\n".join(
+            f"[{c.author.displayName} @ {c.created}]: {c.body}"
+            for c in recent_comments
+        )
+
+    return {
+        "key": issue.key,
+        "summary": f.summary or "",
+        "description": (f.description or "")[:3000],
+        "components": [c.name for c in (f.components or [])],
+        "labels": list(f.labels or []),
+        "status": str(f.status),
+        "priority": str(f.priority),
+        "issue_type": str(f.issuetype),
+        "fix_versions": [v.name for v in (f.fixVersions or [])],
+        "reporter": f.reporter.displayName if f.reporter else "Unknown",
+        "assignee": f.assignee.displayName if f.assignee else "Unassigned",
+        "comments": comments_text,
+    }
+
+
 def fetch_tickets(jira: JIRA, jql: str) -> list[dict]:
-    """Fetch all tickets matching the JQL and extract relevant fields."""
-    log(f"Fetching tickets from Jira...")
+    """Fetch all tickets matching the JQL and extract relevant fields.
+
+    Uses enhanced_search_issues (Jira Cloud v3 API) with cursor-based pagination,
+    falling back to search_issues (classic API) for older Jira instances.
+    """
+    log("Fetching tickets from Jira...")
     log(f"  JQL: {jql}")
     tickets = []
-    start = 0
-    page_size = 50
     page_num = 0
 
-    while True:
-        page_num += 1
-        page_start = time.monotonic()
-        log(f"  Fetching page {page_num} (offset {start})...")
-        issues = jira.search_issues(
-            jql,
-            startAt=start,
-            maxResults=page_size,
-            fields=",".join(FIELDS_TO_FETCH),
-        )
-        if not issues:
-            break
+    # Try the new enhanced search first (required for Jira Cloud)
+    try:
+        next_page_token = None
+        while True:
+            page_num += 1
+            page_start = time.monotonic()
+            log(f"  Fetching page {page_num}...")
+            kwargs = {
+                "jql_str": jql,
+                "maxResults": 50,
+                "fields": FIELDS_TO_FETCH,
+            }
+            if next_page_token:
+                kwargs["nextPageToken"] = next_page_token
 
-        for issue in issues:
-            f = issue.fields
-            comments_text = ""
-            if f.comment and f.comment.comments:
-                # Get last 10 comments for context
-                recent_comments = f.comment.comments[-10:]
-                comments_text = "\n---\n".join(
-                    f"[{c.author.displayName} @ {c.created}]: {c.body}"
-                    for c in recent_comments
-                )
+            result = jira.enhanced_search_issues(**kwargs)
 
-            tickets.append({
-                "key": issue.key,
-                "summary": f.summary or "",
-                "description": (f.description or "")[:3000],  # Truncate long descriptions
-                "components": [c.name for c in (f.components or [])],
-                "labels": list(f.labels or []),
-                "status": str(f.status),
-                "priority": str(f.priority),
-                "issue_type": str(f.issuetype),
-                "fix_versions": [v.name for v in (f.fixVersions or [])],
-                "reporter": f.reporter.displayName if f.reporter else "Unknown",
-                "assignee": f.assignee.displayName if f.assignee else "Unassigned",
-                "comments": comments_text,
-            })
+            for issue in result:
+                tickets.append(_parse_issue(issue))
 
-        page_elapsed = time.monotonic() - page_start
-        log(f"  Page {page_num}: got {len(issues)} tickets ({page_elapsed:.1f}s) — {len(tickets)} total so far")
+            page_elapsed = time.monotonic() - page_start
+            log(f"  Page {page_num}: got {len(result)} tickets ({page_elapsed:.1f}s) — {len(tickets)} total so far")
 
-        start += len(issues)
-        if len(issues) < page_size:
-            break
+            next_page_token = result.nextPageToken if hasattr(result, "nextPageToken") else None
+            if not next_page_token or len(result) == 0:
+                break
+
+    except (AttributeError, TypeError):
+        # Fallback: older jira library without enhanced_search_issues
+        log("  Falling back to classic search API...", "WARN")
+        tickets = []
+        start = 0
+        page_num = 0
+        while True:
+            page_num += 1
+            page_start = time.monotonic()
+            log(f"  Fetching page {page_num} (offset {start})...")
+            issues = jira.search_issues(
+                jql,
+                startAt=start,
+                maxResults=50,
+                fields=",".join(FIELDS_TO_FETCH),
+            )
+            if not issues:
+                break
+            for issue in issues:
+                tickets.append(_parse_issue(issue))
+            page_elapsed = time.monotonic() - page_start
+            log(f"  Page {page_num}: got {len(issues)} tickets ({page_elapsed:.1f}s) — {len(tickets)} total so far")
+            start += len(issues)
+            if len(issues) < 50:
+                break
 
     log(f"Fetched {len(tickets)} tickets total")
     return tickets
