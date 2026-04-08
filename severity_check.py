@@ -568,6 +568,7 @@ def run_actual_mode(
     total = len(tickets)
     commented = 0
     skipped = 0
+    proposed_changes = []
 
     log(f"Starting ACTUAL RUN — {total} tickets to analyze")
     print("=" * 100)
@@ -633,6 +634,15 @@ def run_actual_mode(
         add_label_to_ticket(jira, ticket["key"], "AI-Priority-Check")
         add_label_to_ticket(jira, ticket["key"], "AI-Priority-Propose")
 
+        proposed_changes.append({
+            "key": ticket["key"],
+            "summary": ticket["summary"][:60],
+            "current": analysis["current_priority"],
+            "proposed": analysis["proposed_priority"],
+            "confidence": analysis["confidence"],
+            "rationale": analysis["rationale"],
+        })
+
         commented += 1
         processed += 1
         print("-" * 100)
@@ -664,6 +674,25 @@ def run_actual_mode(
     status = "INTERRUPTED" if _shutdown_requested else "COMPLETE"
     log(f"ACTUAL RUN {status} — {processed}/{total} tickets processed, {commented} commented, {skipped} skipped")
     log(f"Log saved to {log_path}")
+
+    if proposed_changes:
+        print("\n" + "=" * 100)
+        print("TICKETS WITH PROPOSED PRIORITY CHANGES")
+        print("=" * 100)
+        table_data = [
+            [c["key"], c["summary"], c["current"], c["proposed"], c["confidence"]]
+            for c in proposed_changes
+        ]
+        print(tabulate(
+            table_data,
+            headers=["Ticket", "Summary", "Current", "Proposed", "Confidence"],
+            tablefmt="grid",
+            maxcolwidths=[15, 40, 10, 10, 10],
+        ))
+        print(f"\nTotal: {len(proposed_changes)} tickets need priority review")
+        for c in proposed_changes:
+            print(f"  {c['key']}: {c['current']} -> {c['proposed']}")
+            print(f"    Reason: {c['rationale']}")
 
 
 # ---------------------------------------------------------------------------
