@@ -928,6 +928,9 @@ Examples:
   # Dry run - analyze tickets without making changes
   python severity_check.py --mode dry --jql "project = WEKAPP AND priority = Critical AND status = Open"
 
+  # Analyze a single ticket
+  python severity_check.py --mode dry --ticket WEKAPP-607003
+
   # Actual run - add comments and labels to tickets
   python severity_check.py --mode actual --jql "project = WEKAPP AND priority = Critical"
 
@@ -944,7 +947,12 @@ Examples:
     parser.add_argument(
         "--jql",
         type=str,
-        help="Jira JQL query to fetch tickets (required for dry and actual modes)",
+        help="Jira JQL query to fetch tickets",
+    )
+    parser.add_argument(
+        "--ticket",
+        type=str,
+        help="Single Jira ticket key (e.g. WEKAPP-607003)",
     )
     parser.add_argument(
         "--config",
@@ -955,8 +963,10 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.mode in ("dry", "actual") and not args.jql:
-        parser.error("--jql is required for dry and actual modes")
+    if args.mode in ("dry", "actual") and not args.jql and not args.ticket:
+        parser.error("--jql or --ticket is required for dry and actual modes")
+    if args.jql and args.ticket:
+        parser.error("--jql and --ticket are mutually exclusive")
 
     # Load config
     config = load_config(args.config)
@@ -981,10 +991,14 @@ Examples:
         return
 
     # Fetch tickets
-    tickets = fetch_tickets(jira, args.jql)
+    if args.ticket:
+        jql = f"key = {args.ticket}"
+    else:
+        jql = args.jql
+    tickets = fetch_tickets(jira, jql)
 
     if not tickets:
-        log("No tickets found. Check your JQL query.")
+        log("No tickets found. Check your JQL query or ticket key.")
         return
 
     if args.mode == "dry":
