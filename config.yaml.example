@@ -26,6 +26,6 @@ settings:
   # Path to the JSON log file
   log_file: "severity_check_log.json"
   # Claude model to use
-  # Direct/Vertex: "claude-opus-4-20250514"
-  # Bedrock:       "us.anthropic.claude-opus-4-20250514-v1:0"
-  claude_model: "us.anthropic.claude-opus-4-20250514-v1:0"
+  # Direct/Vertex: "claude-sonnet-4-6-20250514"
+  # Bedrock:       "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
+  claude_model: "us.anthropic.claude-sonnet-4-6-20250514-v1:0"

@@ -35,6 +35,19 @@ import yaml
 from jira import JIRA
 from tabulate import tabulate
 
+# ---------------------------------------------------------------------------
+# Progress logging
+# ---------------------------------------------------------------------------
+
+_start_time = time.monotonic()
+
+
+def log(msg: str, level: str = "INFO"):
+    """Print a timestamped log message to stderr so progress is always visible."""
+    elapsed = time.monotonic() - _start_time
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [{elapsed:7.1f}s] [{level:5s}] {msg}", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -43,9 +56,10 @@ from tabulate import tabulate
 def load_config(config_path: str = "config.yaml") -> dict:
     path = Path(config_path)
     if not path.exists():
-        print(f"Error: Config file '{config_path}' not found.")
-        print("Copy config.yaml.example to config.yaml and fill in your credentials.")
+        log(f"Config file '{config_path}' not found.", "ERROR")
+        log("Copy config.yaml.example to config.yaml and fill in your credentials.", "ERROR")
         sys.exit(1)
+    log(f"Loaded config from {config_path}")
     with open(path) as f:
         return yaml.safe_load(f)
 
@@ -63,30 +77,36 @@ def get_anthropic_client(config: dict) -> anthropic.Anthropic:
 
     if provider == "bedrock":
         region = claude_cfg.get("aws_region", "us-east-1")
+        log(f"Connecting to Claude via AWS Bedrock (region: {region})")
         return anthropic.AnthropicBedrock(aws_region=region)
 
     elif provider == "vertex":
         project_id = claude_cfg.get("gcp_project_id")
         region = claude_cfg.get("gcp_region", "us-east5")
         if not project_id:
-            print("Error: claude.gcp_project_id is required in config.yaml for Vertex AI provider.")
+            log("claude.gcp_project_id is required in config.yaml for Vertex AI provider.", "ERROR")
             sys.exit(1)
+        log(f"Connecting to Claude via Vertex AI (project: {project_id}, region: {region})")
         return anthropic.AnthropicVertex(project_id=project_id, region=region)
 
     else:  # direct
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            print("Error: ANTHROPIC_API_KEY environment variable is not set.")
+            log("ANTHROPIC_API_KEY environment variable is not set.", "ERROR")
             sys.exit(1)
+        log("Connecting to Claude via direct API")
         return anthropic.Anthropic(api_key=api_key)
 
 
 def get_jira_client(config: dict) -> JIRA:
     jira_cfg = config["jira"]
-    return JIRA(
+    log(f"Connecting to Jira at {jira_cfg['url']} as {jira_cfg['email']}")
+    client = JIRA(
         server=jira_cfg["url"],
         basic_auth=(jira_cfg["email"], jira_cfg["api_token"]),
     )
+    log("Jira connection established")
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +117,12 @@ def load_severity_reference(config: dict) -> str:
     severity_file = config.get("settings", {}).get("severity_file", "SeverityCheck.md")
     path = Path(severity_file)
     if not path.exists():
-        print(f"Error: Severity reference file '{severity_file}' not found.")
+        log(f"Severity reference file '{severity_file}' not found.", "ERROR")
         sys.exit(1)
     with open(path) as f:
-        return f.read()
+        content = f.read()
+    log(f"Loaded severity reference from {severity_file} ({len(content)} chars)")
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -124,11 +146,17 @@ FIELDS_TO_FETCH = [
 
 def fetch_tickets(jira: JIRA, jql: str) -> list[dict]:
     """Fetch all tickets matching the JQL and extract relevant fields."""
+    log(f"Fetching tickets from Jira...")
+    log(f"  JQL: {jql}")
     tickets = []
     start = 0
     page_size = 50
+    page_num = 0
 
     while True:
+        page_num += 1
+        page_start = time.monotonic()
+        log(f"  Fetching page {page_num} (offset {start})...")
         issues = jira.search_issues(
             jql,
             startAt=start,
@@ -164,23 +192,33 @@ def fetch_tickets(jira: JIRA, jql: str) -> list[dict]:
                 "comments": comments_text,
             })
 
+        page_elapsed = time.monotonic() - page_start
+        log(f"  Page {page_num}: got {len(issues)} tickets ({page_elapsed:.1f}s) — {len(tickets)} total so far")
+
         start += len(issues)
         if len(issues) < page_size:
             break
 
+    log(f"Fetched {len(tickets)} tickets total")
     return tickets
 
 
 def add_comment_to_ticket(jira: JIRA, ticket_key: str, comment: str):
+    log(f"  Adding comment to {ticket_key}...")
     jira.add_comment(ticket_key, comment)
+    log(f"  Comment added to {ticket_key}")
 
 
 def add_label_to_ticket(jira: JIRA, ticket_key: str, label: str):
+    log(f"  Adding label '{label}' to {ticket_key}...")
     issue = jira.issue(ticket_key)
     current_labels = list(issue.fields.labels or [])
     if label not in current_labels:
         current_labels.append(label)
         issue.update(fields={"labels": current_labels})
+        log(f"  Label '{label}' added to {ticket_key}")
+    else:
+        log(f"  Label '{label}' already exists on {ticket_key}, skipping")
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +282,18 @@ Analyze this ticket's priority based on the severity criteria above. Return your
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            attempt_label = f" (attempt {attempt + 1}/{max_retries})" if attempt > 0 else ""
+            log(f"  Sending {ticket['key']} to Claude for analysis{attempt_label}...")
+            api_start = time.monotonic()
             response = client.messages.create(
                 model=model,
                 max_tokens=1024,
                 system=ANALYSIS_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_message}],
             )
+            api_elapsed = time.monotonic() - api_start
+            log(f"  Claude responded for {ticket['key']} in {api_elapsed:.1f}s "
+                f"(tokens: {response.usage.input_tokens} in, {response.usage.output_tokens} out)")
             text = response.content[0].text.strip()
             # Strip markdown code fences if present
             if text.startswith("```"):
@@ -260,10 +304,10 @@ Analyze this ticket's priority based on the severity criteria above. Return your
             return json.loads(text)
         except json.JSONDecodeError:
             if attempt < max_retries - 1:
-                print(f"  Warning: Failed to parse Claude response for {ticket['key']}, retrying...")
+                log(f"  Failed to parse Claude response for {ticket['key']}, retrying in 2s...", "WARN")
                 time.sleep(2)
             else:
-                print(f"  Error: Could not parse Claude response for {ticket['key']}")
+                log(f"  Could not parse Claude response for {ticket['key']} after {max_retries} attempts", "ERROR")
                 return {
                     "current_priority": ticket["priority"],
                     "proposed_priority": ticket["priority"],
@@ -273,10 +317,10 @@ Analyze this ticket's priority based on the severity criteria above. Return your
                 }
         except anthropic.APIError as e:
             if attempt < max_retries - 1:
-                print(f"  Warning: API error for {ticket['key']}: {e}. Retrying...")
+                log(f"  API error for {ticket['key']}: {e}. Retrying in 5s...", "WARN")
                 time.sleep(5)
             else:
-                print(f"  Error: API call failed for {ticket['key']}: {e}")
+                log(f"  API call failed for {ticket['key']}: {e}", "ERROR")
                 return {
                     "current_priority": ticket["priority"],
                     "proposed_priority": ticket["priority"],
@@ -339,14 +383,26 @@ def run_dry_mode(tickets: list[dict], client: anthropic.Anthropic, severity_ref:
     log_path = config.get("settings", {}).get("log_file", "severity_check_log.json")
     log_data = load_log(log_path)
 
+    log(f"Starting DRY RUN — {len(tickets)} tickets to analyze")
+    print("=" * 100)
+
     results = []
     total = len(tickets)
     for i, ticket in enumerate(tickets, 1):
-        print(f"  Analyzing [{i}/{total}] {ticket['key']}...", end=" ", flush=True)
+        log(f"[{i}/{total}] Analyzing {ticket['key']}: \"{ticket['summary'][:70]}\"")
+        log(f"  Current priority: {ticket['priority']} | Status: {ticket['status']} | Assignee: {ticket['assignee']}")
+        ticket_start = time.monotonic()
         analysis = analyze_ticket(client, ticket, severity_ref, model)
+        ticket_elapsed = time.monotonic() - ticket_start
         change = "YES" if analysis["change_needed"] else "no"
-        print(f"{'⚠ CHANGE' if analysis['change_needed'] else '✓ OK'} "
-              f"({analysis['current_priority']} → {analysis['proposed_priority']})")
+        if analysis["change_needed"]:
+            log(f"  RESULT: CHANGE PROPOSED — {analysis['current_priority']} -> {analysis['proposed_priority']} "
+                f"(confidence: {analysis['confidence']}) [{ticket_elapsed:.1f}s]")
+            log(f"  Rationale: {analysis['rationale']}")
+        else:
+            log(f"  RESULT: OK — priority {analysis['current_priority']} is correct "
+                f"(confidence: {analysis['confidence']}) [{ticket_elapsed:.1f}s]")
+        print("-" * 100)
 
         results.append({
             "key": ticket["key"],
@@ -379,6 +435,7 @@ def run_dry_mode(tickets: list[dict], client: anthropic.Anthropic, severity_ref:
             log_data.append(log_entry)
 
     save_log(log_path, log_data)
+    log(f"Log saved to {log_path}")
 
     # Print summary table
     print("\n" + "=" * 100)
@@ -397,14 +454,12 @@ def run_dry_mode(tickets: list[dict], client: anthropic.Anthropic, severity_ref:
     ))
 
     changes = [r for r in results if r["change"] == "YES"]
-    print(f"\nTotal tickets: {len(results)}")
-    print(f"Changes proposed: {len(changes)}")
-    print(f"Log saved to: {log_path}")
+    log(f"DRY RUN COMPLETE — {len(results)} tickets analyzed, {len(changes)} changes proposed")
 
     if changes:
         print("\nProposed changes:")
         for r in changes:
-            print(f"  {r['key']}: {r['current']} → {r['proposed']} ({r['confidence']} confidence)")
+            print(f"  {r['key']}: {r['current']} -> {r['proposed']} ({r['confidence']} confidence)")
             print(f"    Reason: {r['rationale']}")
 
 
@@ -427,19 +482,27 @@ def run_actual_mode(
     commented = 0
     skipped = 0
 
+    log(f"Starting ACTUAL RUN — {total} tickets to analyze")
+    print("=" * 100)
+
     for i, ticket in enumerate(tickets, 1):
-        print(f"  Analyzing [{i}/{total}] {ticket['key']}...", end=" ", flush=True)
+        log(f"[{i}/{total}] Processing {ticket['key']}: \"{ticket['summary'][:70]}\"")
+        log(f"  Current priority: {ticket['priority']} | Status: {ticket['status']} | Assignee: {ticket['assignee']}")
 
         # Skip if already has the label (already processed)
         if "AI-Priority-Check" in ticket["labels"]:
-            print("SKIP (already has AI-Priority-Check label)")
+            log(f"  SKIP — already has AI-Priority-Check label")
             skipped += 1
+            print("-" * 100)
             continue
 
+        ticket_start = time.monotonic()
         analysis = analyze_ticket(client, ticket, severity_ref, model)
+        ticket_elapsed = time.monotonic() - ticket_start
 
         if not analysis["change_needed"]:
-            print(f"✓ OK ({analysis['current_priority']} - no change needed)")
+            log(f"  RESULT: OK — priority {analysis['current_priority']} is correct "
+                f"(confidence: {analysis['confidence']}) [{ticket_elapsed:.1f}s]")
             # Log it but don't comment
             entry = find_log_entry(log_data, ticket["key"])
             log_entry = {
@@ -459,9 +522,12 @@ def run_actual_mode(
                 entry.update(log_entry)
             else:
                 log_data.append(log_entry)
+            print("-" * 100)
             continue
 
-        print(f"⚠ CHANGE ({analysis['current_priority']} → {analysis['proposed_priority']})")
+        log(f"  RESULT: CHANGE PROPOSED — {analysis['current_priority']} -> {analysis['proposed_priority']} "
+            f"(confidence: {analysis['confidence']}) [{ticket_elapsed:.1f}s]")
+        log(f"  Rationale: {analysis['rationale']}")
 
         # Add comment
         comment = build_comment(analysis)
@@ -471,6 +537,7 @@ def run_actual_mode(
         add_label_to_ticket(jira, ticket["key"], "AI-Priority-Check")
 
         commented += 1
+        print("-" * 100)
 
         # Update log
         entry = find_log_entry(log_data, ticket["key"])
@@ -496,8 +563,8 @@ def run_actual_mode(
 
     save_log(log_path, log_data)
 
-    print(f"\nDone. Commented on {commented} tickets, skipped {skipped}.")
-    print(f"Log saved to: {log_path}")
+    log(f"ACTUAL RUN COMPLETE — {total} tickets processed, {commented} commented, {skipped} skipped")
+    log(f"Log saved to {log_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +632,7 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
     log_data = load_log(log_path)
 
     if not log_data:
-        print("No log entries found. Run dry or actual mode first.")
+        log("No log entries found. Run dry or actual mode first.")
         return
 
     # Find entries that need review (change was proposed, not yet reviewed)
@@ -575,28 +642,33 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
     ]
 
     if not to_review:
-        print("No unreviewed tickets with proposed changes found.")
+        log("No unreviewed tickets with proposed changes found.")
         return
 
-    print(f"Found {len(to_review)} tickets to review.\n")
+    total = len(to_review)
+    log(f"Starting REVIEW MODE — {total} tickets to review")
+    print("=" * 100)
 
     review_results = []
 
-    for entry in to_review:
+    for i, entry in enumerate(to_review, 1):
         key = entry["key"]
-        print(f"  Reviewing {key}...", end=" ", flush=True)
+        log(f"[{i}/{total}] Reviewing {key}: \"{entry.get('summary', '')[:70]}\"")
+        log(f"  Original priority: {entry['current_priority']} | Proposed: {entry['proposed_priority']}")
 
         try:
+            log(f"  Fetching current state from Jira...")
             issue = jira.issue(key, fields="status,priority")
             current_status = str(issue.fields.status)
             current_priority = str(issue.fields.priority)
         except Exception as e:
-            print(f"Error fetching {key}: {e}")
+            log(f"  Error fetching {key}: {e}", "ERROR")
             continue
 
         # Only review closed tickets (Done or Rejected)
         if current_status not in ("Done", "Rejected", "Fixed"):
-            print(f"SKIP (status: {current_status}, not closed)")
+            log(f"  SKIP — status is '{current_status}' (not closed)")
+            print("-" * 100)
             continue
 
         proposed = entry["proposed_priority"]
@@ -606,6 +678,7 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
         # Check for feedback in comments
         feedback = None
         if entry.get("commented") and entry.get("comment_date"):
+            log(f"  Checking for feedback in comments...")
             feedback = check_feedback_in_comments(jira, key, entry["comment_date"])
 
         outcome = "unknown"
@@ -616,8 +689,9 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
         else:
             outcome = f"changed_to_{current_priority}"
 
-        print(f"Priority: {original} → {current_priority} (proposed: {proposed}) "
-              f"| Outcome: {outcome} | Feedback: {feedback or 'none'}")
+        log(f"  RESULT: {original} -> {current_priority} (proposed: {proposed}) "
+            f"| Outcome: {outcome} | Feedback: {feedback or 'none'}")
+        print("-" * 100)
 
         review_results.append({
             "key": key,
@@ -641,8 +715,10 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
     save_log(log_path, log_data)
 
     if not review_results:
-        print("\nNo closed tickets to review yet.")
+        log("No closed tickets to review yet.")
         return
+
+    log(f"Review complete — {len(review_results)} closed tickets reviewed")
 
     # Print review summary
     print("\n" + "=" * 100)
@@ -660,8 +736,8 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
     ))
 
     accepted = sum(1 for r in review_results if r["outcome"] == "accepted")
-    total = len(review_results)
-    print(f"\nAccepted proposals: {accepted}/{total}")
+    reviewed_total = len(review_results)
+    log(f"Accepted proposals: {accepted}/{reviewed_total}")
 
     # Ask Claude to propose SeverityCheck.md updates
     results_with_learning = [
@@ -670,10 +746,10 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
     ]
 
     if not results_with_learning:
-        print("No actionable learning data from this review cycle.")
+        log("No actionable learning data from this review cycle.")
         return
 
-    print("\nAnalyzing results for SeverityCheck.md updates...")
+    log(f"Sending {len(results_with_learning)} results to Claude for learning analysis...")
 
     review_text = json.dumps(results_with_learning, indent=2)
     user_message = f"""## Current SeverityCheck.md
@@ -689,12 +765,16 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
 Based on these outcomes, propose specific edits to SeverityCheck.md to improve future severity analysis accuracy."""
 
     try:
+        api_start = time.monotonic()
         response = client.messages.create(
             model=model,
             max_tokens=4096,
             system=LEARNING_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
         )
+        api_elapsed = time.monotonic() - api_start
+        log(f"Claude learning analysis completed in {api_elapsed:.1f}s "
+            f"(tokens: {response.usage.input_tokens} in, {response.usage.output_tokens} out)")
         text = response.content[0].text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1]
@@ -703,12 +783,12 @@ Based on these outcomes, propose specific edits to SeverityCheck.md to improve f
             text = text.strip()
         learning = json.loads(text)
     except Exception as e:
-        print(f"Error getting learning suggestions: {e}")
+        log(f"Error getting learning suggestions: {e}", "ERROR")
         return
 
     if not learning.get("changes"):
-        print("Claude suggests no changes to SeverityCheck.md at this time.")
-        print(f"Reason: {learning.get('summary', 'N/A')}")
+        log("Claude suggests no changes to SeverityCheck.md at this time.")
+        log(f"Reason: {learning.get('summary', 'N/A')}")
         return
 
     # Show proposed changes and ask for approval
@@ -818,34 +898,38 @@ Examples:
     config = load_config(args.config)
     provider = config.get("claude", {}).get("provider", "direct")
     if provider == "bedrock":
-        default_model = "us.anthropic.claude-opus-4-20250514-v1:0"
+        default_model = "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
     else:
-        default_model = "claude-opus-4-20250514"
+        default_model = "claude-sonnet-4-6-20250514"
     model = config.get("settings", {}).get("claude_model", default_model)
+
+    log(f"Mode: {args.mode} | Claude provider: {provider} | Model: {model}")
     severity_ref = load_severity_reference(config)
 
     # Initialize clients
-    print(f"Initializing (Claude provider: {provider})...")
     jira = get_jira_client(config)
     claude = get_anthropic_client(config)
 
     if args.mode == "review":
         run_review_mode(jira, claude, severity_ref, model, config)
+        total_elapsed = time.monotonic() - _start_time
+        log(f"Total run time: {total_elapsed:.1f}s")
         return
 
     # Fetch tickets
-    print(f"Fetching tickets with JQL: {args.jql}")
     tickets = fetch_tickets(jira, args.jql)
-    print(f"Found {len(tickets)} tickets.\n")
 
     if not tickets:
-        print("No tickets found. Check your JQL query.")
+        log("No tickets found. Check your JQL query.")
         return
 
     if args.mode == "dry":
         run_dry_mode(tickets, claude, severity_ref, model, config)
     elif args.mode == "actual":
         run_actual_mode(tickets, jira, claude, severity_ref, model, config)
+
+    total_elapsed = time.monotonic() - _start_time
+    log(f"Total run time: {total_elapsed:.1f}s")
 
 
 if __name__ == "__main__":

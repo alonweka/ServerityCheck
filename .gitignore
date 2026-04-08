@@ -1,1 +1,3 @@
 config.yaml
+__pycache__/
+severity_check_log.json
