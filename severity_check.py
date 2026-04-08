@@ -25,6 +25,7 @@ Requires:
 import argparse
 import json
 import os
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -47,6 +48,26 @@ def log(msg: str, level: str = "INFO"):
     elapsed = time.monotonic() - _start_time
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] [{elapsed:7.1f}s] [{level:5s}] {msg}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown on Ctrl+C
+# ---------------------------------------------------------------------------
+
+_shutdown_requested = False
+
+
+def _handle_sigint(signum, frame):
+    global _shutdown_requested
+    if _shutdown_requested:
+        # Second Ctrl+C — force exit
+        log("Force quit.", "WARN")
+        sys.exit(1)
+    _shutdown_requested = True
+    log("Ctrl+C received — finishing current ticket then stopping. Press Ctrl+C again to force quit.", "WARN")
+
+
+signal.signal(signal.SIGINT, _handle_sigint)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +409,13 @@ def run_dry_mode(tickets: list[dict], client: anthropic.Anthropic, severity_ref:
 
     results = []
     total = len(tickets)
+    interrupted = False
     for i, ticket in enumerate(tickets, 1):
+        if _shutdown_requested:
+            log(f"Stopping early — processed {i - 1}/{total} tickets")
+            interrupted = True
+            break
+
         log(f"[{i}/{total}] Analyzing {ticket['key']}: \"{ticket['summary'][:70]}\"")
         log(f"  Current priority: {ticket['priority']} | Status: {ticket['status']} | Assignee: {ticket['assignee']}")
         ticket_start = time.monotonic()
@@ -454,7 +481,8 @@ def run_dry_mode(tickets: list[dict], client: anthropic.Anthropic, severity_ref:
     ))
 
     changes = [r for r in results if r["change"] == "YES"]
-    log(f"DRY RUN COMPLETE — {len(results)} tickets analyzed, {len(changes)} changes proposed")
+    status = "INTERRUPTED" if interrupted else "COMPLETE"
+    log(f"DRY RUN {status} — {len(results)}/{total} tickets analyzed, {len(changes)} changes proposed")
 
     if changes:
         print("\nProposed changes:")
@@ -485,7 +513,12 @@ def run_actual_mode(
     log(f"Starting ACTUAL RUN — {total} tickets to analyze")
     print("=" * 100)
 
+    processed = 0
     for i, ticket in enumerate(tickets, 1):
+        if _shutdown_requested:
+            log(f"Stopping early — processed {processed}/{total} tickets")
+            break
+
         log(f"[{i}/{total}] Processing {ticket['key']}: \"{ticket['summary'][:70]}\"")
         log(f"  Current priority: {ticket['priority']} | Status: {ticket['status']} | Assignee: {ticket['assignee']}")
 
@@ -493,6 +526,7 @@ def run_actual_mode(
         if "AI-Priority-Check" in ticket["labels"]:
             log(f"  SKIP — already has AI-Priority-Check label")
             skipped += 1
+            processed += 1
             print("-" * 100)
             continue
 
@@ -522,6 +556,7 @@ def run_actual_mode(
                 entry.update(log_entry)
             else:
                 log_data.append(log_entry)
+            processed += 1
             print("-" * 100)
             continue
 
@@ -537,6 +572,7 @@ def run_actual_mode(
         add_label_to_ticket(jira, ticket["key"], "AI-Priority-Check")
 
         commented += 1
+        processed += 1
         print("-" * 100)
 
         # Update log
@@ -563,7 +599,8 @@ def run_actual_mode(
 
     save_log(log_path, log_data)
 
-    log(f"ACTUAL RUN COMPLETE — {total} tickets processed, {commented} commented, {skipped} skipped")
+    status = "INTERRUPTED" if _shutdown_requested else "COMPLETE"
+    log(f"ACTUAL RUN {status} — {processed}/{total} tickets processed, {commented} commented, {skipped} skipped")
     log(f"Log saved to {log_path}")
 
 
@@ -652,6 +689,10 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
     review_results = []
 
     for i, entry in enumerate(to_review, 1):
+        if _shutdown_requested:
+            log(f"Stopping early — reviewed {i - 1}/{total} tickets")
+            break
+
         key = entry["key"]
         log(f"[{i}/{total}] Reviewing {key}: \"{entry.get('summary', '')[:70]}\"")
         log(f"  Original priority: {entry['current_priority']} | Proposed: {entry['proposed_priority']}")
