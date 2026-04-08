@@ -1,0 +1,31 @@
+# Jira Configuration
+jira:
+  url: "https://wekaio.atlassian.net"
+  email: "your-email@weka.io"
+  api_token: "your-jira-api-token"
+
+# Claude provider configuration
+# Supported providers: "direct", "bedrock", "vertex"
+claude:
+  # Option 1: Direct API (requires ANTHROPIC_API_KEY env var)
+  # provider: "direct"
+
+  # Option 2: AWS Bedrock (uses AWS credential chain - env vars, ~/.aws/credentials, or IAM role)
+  provider: "bedrock"
+  aws_region: "us-east-1"
+
+  # Option 3: Google Vertex AI (uses Application Default Credentials)
+  # provider: "vertex"
+  # gcp_project_id: "your-gcp-project-id"
+  # gcp_region: "us-east5"
+
+# Severity Check settings
+settings:
+  # Path to the SeverityCheck.md reference file
+  severity_file: "SeverityCheck.md"
+  # Path to the JSON log file
+  log_file: "severity_check_log.json"
+  # Claude model to use
+  # Direct/Vertex: "claude-opus-4-20250514"
+  # Bedrock:       "us.anthropic.claude-opus-4-20250514-v1:0"
+  claude_model: "us.anthropic.claude-opus-4-20250514-v1:0"
