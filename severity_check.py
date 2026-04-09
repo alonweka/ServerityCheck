@@ -7,12 +7,12 @@ using Claude AI to propose priority changes.
 
 Modes:
   dry     - List all tickets with current and proposed priority (no changes)
-  actual  - Add comments and labels to tickets with proposed changes
+  act     - Add comments and labels to tickets with proposed changes
   review  - Review closed tickets, compare outcomes, and learn
 
 Usage:
   python severity_check.py --mode dry --jql "project = WEKAPP AND ..."
-  python severity_check.py --mode actual --jql "project = WEKAPP AND ..."
+  python severity_check.py --mode act --jql "project = WEKAPP AND ..."
   python severity_check.py --mode review
 
 Requires:
@@ -816,7 +816,7 @@ def run_review_mode(jira: JIRA, client: anthropic.Anthropic, severity_ref: str, 
     log_data = load_log(log_path)
 
     if not log_data:
-        log("No log entries found. Run dry or actual mode first.")
+        log("No log entries found. Run dry or act mode first.")
         return
 
     # Find entries that need review (change was proposed, not yet reviewed)
@@ -1056,7 +1056,7 @@ Examples:
   python severity_check.py --mode dry --ticket WEKAPP-607003
 
   # Actual run - add comments and labels to tickets
-  python severity_check.py --mode actual --jql "project = WEKAPP AND priority = Critical"
+  python severity_check.py --mode act --jql "project = WEKAPP AND priority = Critical"
 
   # Review closed tickets and learn from outcomes
   python severity_check.py --mode review
@@ -1064,9 +1064,9 @@ Examples:
     )
     parser.add_argument(
         "--mode",
-        choices=["dry", "actual", "review"],
+        choices=["dry", "act", "review"],
         required=True,
-        help="Operation mode: dry (list only), actual (comment+label), review (check outcomes)",
+        help="Operation mode: dry (list only), act (comment+label), review (check outcomes)",
     )
     parser.add_argument(
         "--jql",
@@ -1093,8 +1093,8 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.mode in ("dry", "actual") and not args.jql and not args.ticket:
-        parser.error("--jql or --ticket is required for dry and actual modes")
+    if args.mode in ("dry", "act") and not args.jql and not args.ticket:
+        parser.error("--jql or --ticket is required for dry and act modes")
     if args.jql and args.ticket:
         parser.error("--jql and --ticket are mutually exclusive")
 
@@ -1133,7 +1133,7 @@ Examples:
 
     if args.mode == "dry":
         run_dry_mode(tickets, claude, severity_ref, model, config, args.check)
-    elif args.mode == "actual":
+    elif args.mode == "act":
         run_actual_mode(tickets, jira, claude, severity_ref, model, config, args.check)
 
     total_elapsed = time.monotonic() - _start_time
