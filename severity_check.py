@@ -1079,7 +1079,7 @@ Examples:
         help="Single Jira ticket key (e.g. WEKAPP-607003)",
     )
     parser.add_argument(
-        "--direction",
+        "--check",
         choices=["increase", "decrease", "all"],
         default="increase",
         help="Which priority changes to raise: increase (raise severity), decrease (lower severity), all (default: increase)",
@@ -1107,7 +1107,7 @@ Examples:
         default_model = "claude-sonnet-4-6-20250514"
     model = config.get("settings", {}).get("claude_model", default_model)
 
-    log(f"Mode: {args.mode} | Direction: {args.direction} | Claude provider: {provider} | Model: {model}")
+    log(f"Mode: {args.mode} | Check: {args.check} | Claude provider: {provider} | Model: {model}")
     severity_ref = load_severity_reference(config)
 
     # Initialize clients
@@ -1132,9 +1132,9 @@ Examples:
         return
 
     if args.mode == "dry":
-        run_dry_mode(tickets, claude, severity_ref, model, config, args.direction)
+        run_dry_mode(tickets, claude, severity_ref, model, config, args.check)
     elif args.mode == "actual":
-        run_actual_mode(tickets, jira, claude, severity_ref, model, config, args.direction)
+        run_actual_mode(tickets, jira, claude, severity_ref, model, config, args.check)
 
     total_elapsed = time.monotonic() - _start_time
     log(f"Total run time: {total_elapsed:.1f}s")
